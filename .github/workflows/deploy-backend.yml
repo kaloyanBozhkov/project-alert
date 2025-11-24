@@ -1,0 +1,91 @@
+name: Build and Deploy backend to VPS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      REMOTE_DIR: ${{ secrets.REMOTE_DIR }}
+      BOT_NAME: ${{ secrets.BOT_NAME }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      API_KEY: ${{ secrets.API_KEY }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+
+      - name: Install all workspace project deps
+        run: pnpm install
+
+      - name: Build Docker image
+        run: |
+          cd src
+          docker build -t project-alerts:latest -f Dockerfile ..
+          docker save project-alerts:latest > project-alerts.tar
+
+      - name: Create environment file
+        run: |
+          echo "BOT_NAME=${{ env.BOT_NAME }}" > src/.env.production
+          echo "BOT_TOKEN=${{ env.BOT_TOKEN }}" >> src/.env.production
+          echo "API_KEY=${{ env.API_KEY }}" >> src/.env.production
+          echo "TELEGRAM_CHAT_ID=${{ env.TELEGRAM_CHAT_ID }}" >> src/.env.production
+
+      - name: Upload Docker image and deployment files to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ env.SSH_HOST }}
+          username: ${{ env.SSH_USER }}
+          key: ${{ env.SSH_KEY }}
+          source: "src/project-alerts.tar,src/docker-compose.yml,src/.env.production"
+          target: ${{ env.REMOTE_DIR }}
+          strip_components: 1
+
+      - name: Deploy on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ env.SSH_HOST }}
+          username: ${{ env.SSH_USER }}
+          key: ${{ env.SSH_KEY }}
+          script: |
+            cd ${{ env.REMOTE_DIR }}
+            
+            # Load the new Docker image
+            docker load < project-alerts.tar
+            
+            # Stop and remove existing container if it exists
+            docker compose down || true
+            
+            # Remove the old image to save space (optional)
+            docker image prune -f
+            
+            # Start the new container with environment variables
+            docker compose --env-file .env.production up -d
+            
+            # Clean up the tar file
+            rm -f project-alerts.tar
+            
+            # Show container status
+            docker compose ps
+      
